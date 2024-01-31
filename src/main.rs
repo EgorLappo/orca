@@ -13,27 +13,45 @@ use jemallocator::Jemalloc;
 static GLOBAL: Jemalloc = Jemalloc;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about = "Compute f_ORCA for folklore markers", long_about = None)]
 struct Opts {
-    #[arg(short, long)]
+    #[arg(short, long, help = "input csv file")]
     input: PathBuf,
-    #[arg(short, long)]
+    #[arg(short, long, help = "output csv file")]
     output: PathBuf,
-    #[arg(short)]
+    #[arg(short, help = "number of populations K")]
     k: usize,
-    #[arg(short, default_value_t = 2)]
+    #[arg(
+        short,
+        default_value_t = 2,
+        help = "number of markers for exhaustive search"
+    )]
     r: usize,
-    #[arg(short, long, default_value_t = 20)]
+    #[arg(
+        short,
+        long,
+        default_value_t = 20,
+        help = "number of best markers to return"
+    )]
     nmarkers: usize,
-    #[arg(short, long)]
+    #[arg(short, long, help = "silent mode")]
     silent: bool,
+    #[arg(
+        short,
+        long,
+        help = "number of most frequent markers to keep from the input"
+    )]
+    cut: Option<usize>,
 }
 
 fn main() -> Result<()> {
     let opts = Opts::parse();
+    assert!(opts.nmarkers >= opts.r);
 
     // read input csv
     let data = read_input_csv(&opts.input, opts.k).wrap_err("failed to read input csv")?;
+
+    let data = cut_data(data, &opts).wrap_err("failed to truncate the input dataset")?;
 
     // create marker set
     let mut markers = MarkerSet::new(data, &opts);
@@ -231,7 +249,7 @@ fn read_input_csv(input: &Path, k: usize) -> Result<DataFrame> {
         .infer_schema(Some(10))
         .finish()?;
 
-    let mut cols = vec!["id".to_string()];
+    let mut cols = vec!["id".to_string(), "freq".to_string()];
     for i in 0..k {
         cols.push(format!("freq{}", i + 1));
     }
@@ -264,6 +282,22 @@ fn write_output(markers: &MarkerSet, output: &Path) -> Result<()> {
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(())
+}
+
+fn cut_data(data: DataFrame, opts: &Opts) -> Result<DataFrame> {
+    if let Some(cut) = opts.cut {
+        // fail if cut < nmarkers
+        if cut < opts.nmarkers {
+            return Err(color_eyre::eyre::eyre!(
+                "cut must be greater than or equal to nmarkers"
+            ));
+        }
+
+        // sort data by freq and keep the top cut rows
+        Ok(data.sort(["freq"], true, false)?.head(Some(cut)))
+    } else {
+        Ok(data)
+    }
 }
 
 fn cluster_proportions(data: &DataFrame, k: usize) -> Vec<f64> {
