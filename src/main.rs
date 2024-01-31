@@ -4,6 +4,7 @@ use intmap::IntMap;
 use itertools::Itertools;
 use polars::prelude::*;
 use rayon::prelude::*;
+use std::path::{Path, PathBuf};
 // use rand::{prelude::*, rngs::SmallRng};
 
 use jemallocator::Jemalloc;
@@ -15,50 +16,73 @@ static GLOBAL: Jemalloc = Jemalloc;
 #[command(author, version, about, long_about = None)]
 struct Opts {
     #[arg(short, long)]
-    input: String,
+    input: PathBuf,
     #[arg(short, long)]
-    output: String,
+    output: PathBuf,
     #[arg(short)]
     k: usize,
     #[arg(short, default_value_t = 2)]
     r: usize,
+    #[arg(short, long, default_value_t = 20)]
+    nmarkers: usize,
+    #[arg(short, long)]
+    silent: bool,
 }
 
 fn main() -> Result<()> {
     let opts = Opts::parse();
 
     // read input csv
-    let data = read_input_csv(&opts.input, opts.k).wrap_err("Failed to read input csv")?;
+    let data = read_input_csv(&opts.input, opts.k).wrap_err("failed to read input csv")?;
 
     // create marker set
     let mut markers = MarkerSet::new(data, &opts);
-
-    println!("Number of markers: {}", markers.rest.len());
+    if !opts.silent {
+        println!(
+            "searching for {} best among {} markers in {} populations",
+            opts.nmarkers,
+            markers.markers.len(),
+            opts.k
+        );
+    }
 
     // first search exhaustive for first r
-    let f_orca = markers.search_exhaustive();
+    if !opts.silent {
+        println!("searching for first {} markers exhaustively", opts.r);
+    }
+    markers.search_exhaustive();
 
-    println!("First orca score: {}", f_orca);
-    println!("First set: {:?}", markers.current_ids());
-
-    for _ in 0..15 {
-        let f_orca = markers.add_greedy();
-
-        println!("Next orca score: {}", f_orca);
-        println!("Next set: {:?}", markers.current_ids());
+    // then add the rest of the markers greedily
+    let j = opts.nmarkers - opts.r;
+    for _ in 0..j {
+        if !opts.silent {
+            println!("adding marker {}/{}", markers.cur.len() + 1, opts.nmarkers);
+        }
+        markers.add_greedy();
     }
 
     // save results
+    write_output(&markers, &opts.output).wrap_err("failed to write output csv")?;
 
     Ok(())
 }
 
 struct MarkerSet {
+    // actual marker labels for printing/output
     ids: Vec<String>,
+    // current best set of informative markers
+    //   (in order of addition to the set)
     cur: Vec<u64>,
+    // f_orca scores for each stage of the search
+    //   (in the same order as cur)
+    orcas: Vec<f64>,
+    // remaining markers to search over
     rest: Vec<u64>,
+    // marker frequencies in each of the populations
     markers: IntMap<Vec<f64>>,
+    // number of markers to consider for exhaustive searches
     r: usize,
+    // prior probabilities of each population
     k_prior: Vec<f64>,
 }
 
@@ -95,6 +119,7 @@ impl MarkerSet {
         MarkerSet {
             ids,
             cur: vec![],
+            orcas: vec![],
             rest: markers.keys().copied().collect(),
             markers,
             r: opts.r,
@@ -131,6 +156,7 @@ impl MarkerSet {
             });
 
         self.cur = best.1;
+        self.orcas = self.cur.iter().map(|_| best.0).collect();
         self.rest.retain(|i| !self.cur.contains(i));
 
         best.0
@@ -159,12 +185,14 @@ impl MarkerSet {
             });
 
         self.cur.push(best.1);
+        self.orcas.push(best.0);
         self.rest.retain(|i| *i != best.1);
 
         best.0
     }
 }
 
+// polymorphic code setup to add other ways to compute f_orca in the future
 trait Orca {
     fn compute(&self, markers: Vec<&Vec<f64>>, k_prior: &[f64]) -> f64;
 }
@@ -197,7 +225,7 @@ impl Orca for OrcaFull {
     }
 }
 
-fn read_input_csv(input: &str, k: usize) -> Result<DataFrame> {
+fn read_input_csv(input: &Path, k: usize) -> Result<DataFrame> {
     let reader = CsvReader::from_path(input)?
         .has_header(true)
         .infer_schema(Some(10))
@@ -213,6 +241,29 @@ fn read_input_csv(input: &str, k: usize) -> Result<DataFrame> {
         .wrap_err("couldn't find required columns in the input csv")?;
 
     Ok(df)
+}
+
+fn write_output(markers: &MarkerSet, output: &Path) -> Result<()> {
+    #[derive(serde::Serialize)]
+    struct OutRow {
+        id: String,
+        orca: f64,
+    }
+
+    let mut writer = csv::Writer::from_path(output)?;
+
+    markers
+        .current_ids()
+        .iter()
+        .zip(markers.orcas.iter())
+        .map(|(id, orca)| OutRow {
+            id: id.clone(),
+            orca: *orca,
+        })
+        .map(|row| writer.serialize(row))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(())
 }
 
 fn cluster_proportions(data: &DataFrame, k: usize) -> Vec<f64> {
