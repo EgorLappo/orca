@@ -2,12 +2,12 @@ use clap::Parser;
 use color_eyre::eyre::{Result, WrapErr};
 use intmap::IntMap;
 use itertools::Itertools;
+use jemallocator::Jemalloc;
+use log::debug;
 use polars::prelude::*;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
-// use rand::{prelude::*, rngs::SmallRng};
-
-use jemallocator::Jemalloc;
+use std::sync::{Arc, Mutex};
 
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
@@ -34,8 +34,12 @@ struct Opts {
         help = "number of best markers to return"
     )]
     nmarkers: usize,
-    #[arg(short, long, help = "silent mode")]
-    silent: bool,
+    #[arg(
+        short,
+        long,
+        help = "compute non-uniform prior for the population distribution"
+    )]
+    prior: bool,
     #[arg(
         short,
         long,
@@ -45,6 +49,8 @@ struct Opts {
 }
 
 fn main() -> Result<()> {
+    env_logger::init();
+
     let opts = Opts::parse();
     assert!(opts.nmarkers >= opts.r);
 
@@ -55,27 +61,21 @@ fn main() -> Result<()> {
 
     // create marker set
     let mut markers = MarkerSet::new(data, &opts);
-    if !opts.silent {
-        println!(
-            "searching for {} best among {} markers in {} populations",
-            opts.nmarkers,
-            markers.markers.len(),
-            opts.k
-        );
-    }
+    debug!(
+        "searching for {} best among {} markers in {} populations",
+        opts.nmarkers,
+        markers.markers.len(),
+        opts.k
+    );
 
     // first search exhaustive for first r
-    if !opts.silent {
-        println!("searching for first {} markers exhaustively", opts.r);
-    }
+    debug!("searching for first {} markers exhaustively", opts.r);
     markers.search_exhaustive();
 
     // then add the rest of the markers greedily
     let j = opts.nmarkers - opts.r;
     for _ in 0..j {
-        if !opts.silent {
-            println!("adding marker {}/{}", markers.cur.len() + 1, opts.nmarkers);
-        }
+        debug!("adding marker {}/{}", markers.cur.len() + 1, opts.nmarkers);
         markers.add_greedy();
     }
 
@@ -106,7 +106,13 @@ struct MarkerSet {
 
 impl MarkerSet {
     fn new(data: DataFrame, opts: &Opts) -> Self {
-        let k_prior = cluster_proportions(&data, opts.k);
+        let k_prior = if opts.prior {
+            debug!("computing non-uniform prior for the population distribution");
+            cluster_proportions(&data, opts.k)
+        } else {
+            debug!("using uniform prior for the population distribution");
+            vec![1.0 / opts.k as f64; opts.k]
+        };
 
         // store string ids sepatarely from data
         let ids = data
@@ -118,7 +124,7 @@ impl MarkerSet {
             .map(|x| x.unwrap().to_string())
             .collect::<Vec<_>>();
 
-        // convert data to HashMap<frequency vector"cargo>
+        // store marker frequencies in a map
         let mut markers: IntMap<Vec<f64>> = IntMap::with_capacity(data.height());
         for (j, row) in (0..data.height()).enumerate() {
             let freqs = (0..opts.k)
@@ -154,25 +160,26 @@ impl MarkerSet {
 
     // returns best orca score for the chosen set
     fn search_exhaustive(&mut self) -> f64 {
-        let mut best = (0.0, vec![]);
+        // NOTE: could be done with RwLock instead but i don't see the reason
+        let best = Arc::new(Mutex::new((0.0, vec![])));
 
         self.rest
             .clone()
             .into_iter()
             .combinations(self.r)
             .par_bridge()
-            .map(|c| {
+            .for_each(|c| {
                 let score = OrcaFull.compute(self.markers.get_many(&c), &self.k_prior);
-                (score, c)
-            })
-            .collect::<Vec<_>>()
-            .iter()
-            .for_each(|(score, c)| {
-                if score > &best.0 {
-                    best = (*score, c.clone());
+                // check if score is better than the best so far
+                // if yes then update
+                let mut best = best.lock().unwrap();
+                if score > best.0 {
+                    *best = (score, c);
                 }
             });
 
+        // update the state with the best set
+        let best = Arc::try_unwrap(best).unwrap().into_inner().unwrap();
         self.cur = best.1;
         self.orcas = self.cur.iter().map(|_| best.0).collect();
         self.rest.retain(|i| !self.cur.contains(i));
@@ -181,27 +188,21 @@ impl MarkerSet {
     }
 
     fn add_greedy(&mut self) -> f64 {
-        let mut best = (0.0, 0);
+        let best = Arc::new(Mutex::new((0.0, 0)));
 
-        self.rest
-            .clone()
-            .into_par_iter()
-            .map(|i| {
-                let score = OrcaFull.compute(
-                    self.markers
-                        .get_many(self.cur.iter().chain(std::iter::once(&i))),
-                    &self.k_prior,
-                );
-                (score, i)
-            })
-            .collect::<Vec<_>>()
-            .iter()
-            .for_each(|(score, i)| {
-                if score > &best.0 {
-                    best = (*score, *i);
-                }
-            });
+        self.rest.clone().into_par_iter().for_each(|i| {
+            let score = OrcaFull.compute(
+                self.markers
+                    .get_many(self.cur.iter().chain(std::iter::once(&i))),
+                &self.k_prior,
+            );
+            let mut best = best.lock().unwrap();
+            if score > best.0 {
+                *best = (score, i);
+            }
+        });
 
+        let best = Arc::try_unwrap(best).unwrap().into_inner().unwrap();
         self.cur.push(best.1);
         self.orcas.push(best.0);
         self.rest.retain(|i| *i != best.1);
