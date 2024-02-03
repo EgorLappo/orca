@@ -4,10 +4,11 @@ use intmap::IntMap;
 use itertools::Itertools;
 use jemallocator::Jemalloc;
 use log::debug;
+use parking_lot::Mutex;
 use polars::prelude::*;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
@@ -172,14 +173,14 @@ impl MarkerSet {
                 let score = OrcaFull.compute(self.markers.get_many(&c), &self.k_prior);
                 // check if score is better than the best so far
                 // if yes then update
-                let mut best = best.lock().unwrap();
+                let mut best = best.lock();
                 if score > best.0 {
                     *best = (score, c);
                 }
             });
 
         // update the state with the best set
-        let best = Arc::try_unwrap(best).unwrap().into_inner().unwrap();
+        let best = Arc::try_unwrap(best).unwrap().into_inner();
         self.cur = best.1;
         self.orcas = self.cur.iter().map(|_| best.0).collect();
         self.rest.retain(|i| !self.cur.contains(i));
@@ -196,13 +197,13 @@ impl MarkerSet {
                     .get_many(self.cur.iter().chain(std::iter::once(&i))),
                 &self.k_prior,
             );
-            let mut best = best.lock().unwrap();
+            let mut best = best.lock();
             if score > best.0 {
                 *best = (score, i);
             }
         });
 
-        let best = Arc::try_unwrap(best).unwrap().into_inner().unwrap();
+        let best = Arc::try_unwrap(best).unwrap().into_inner();
         self.cur.push(best.1);
         self.orcas.push(best.0);
         self.rest.retain(|i| *i != best.1);
