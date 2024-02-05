@@ -180,6 +180,13 @@ impl MarkerSet {
             markers.insert(j as u64, freqs);
         }
 
+        // make sure all entries in markers are 0 <= x <= 1
+        for (_, freqs) in markers.iter_mut() {
+            for f in freqs.iter_mut() {
+                *f = f.max(0.0).min(1.0);
+            }
+        }
+
         MarkerSet {
             ids,
             cur: vec![],
@@ -408,6 +415,7 @@ fn sim_with_proportions(p: &[f64], rng: &mut SmallRng) -> usize {
 }
 
 fn sim_coin(p: f64, rng: &mut SmallRng) -> f64 {
+    let p = p.max(0.0).min(1.0);
     if rng.gen_bool(p) {
         1.0
     } else {
