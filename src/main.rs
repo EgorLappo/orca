@@ -101,9 +101,8 @@ fn main() -> Result<()> {
     let orca_full = OrcaFull;
     let orca_sim = OrcaSim::new(&opts);
 
-    let j = opts.nmarkers - opts.r;
-    for i in 0..j {
-        if i < opts.full_orca_limit {
+    for _ in 0..(opts.nmarkers - opts.r) {
+        if markers.cur.len() < opts.full_orca_limit {
             debug!(
                 "adding marker {}/{} using exhaustive f_ORCA computation",
                 markers.cur.len() + 1,
