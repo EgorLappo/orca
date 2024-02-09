@@ -63,6 +63,11 @@ struct Opts {
         help = "maximal number of markers for full ORCA computation"
     )]
     full_orca_limit: usize,
+    #[arg(
+        long,
+        help = "compute and save evaluation of each single marker to a provided file"
+    )]
+    single_marker_eval: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -187,7 +192,7 @@ impl MarkerSet {
             }
         }
 
-        MarkerSet {
+        let marker_set = MarkerSet {
             ids,
             cur: vec![],
             orcas: vec![],
@@ -195,7 +200,25 @@ impl MarkerSet {
             markers,
             r: opts.r,
             k_prior,
+        };
+
+        if let Some(single_marker_eval) = opts.single_marker_eval.as_ref() {
+            debug!(
+                "saving single marker evaluation to {}",
+                single_marker_eval.display()
+            );
+            let orca = OrcaFull;
+            let mut writer = csv::Writer::from_path(single_marker_eval).unwrap();
+            for (i, id) in marker_set.ids.iter().enumerate() {
+                let orca = orca.init().compute(
+                    marker_set.markers.get_many(&[i as u64]),
+                    &marker_set.k_prior,
+                );
+                writer.serialize((id, orca)).unwrap();
+            }
         }
+
+        marker_set
     }
 
     fn from_initial_set(data: DataFrame, opts: &Opts, initial_set: Vec<&str>) -> Result<Self> {
