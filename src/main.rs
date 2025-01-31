@@ -425,7 +425,7 @@ impl OrcaState for OrcaSimState {
     }
 }
 
-// math/computation helper function
+// math/computation helper functions
 fn sim_with_proportions(p: &[f64], rng: &mut SmallRng) -> usize {
     let mut r = rng.gen_range(0.0..1.0);
     for (i, &x) in p.iter().enumerate() {
@@ -438,7 +438,7 @@ fn sim_with_proportions(p: &[f64], rng: &mut SmallRng) -> usize {
 }
 
 fn sim_coin(p: f64, rng: &mut SmallRng) -> f64 {
-    let p = p.max(0.0).min(1.0);
+    let p = p.clamp(0.0, 1.0);
     if rng.gen_bool(p) {
         1.0
     } else {
@@ -515,6 +515,7 @@ fn cluster_proportions(data: &DataFrame, k: usize) -> Vec<f64> {
             .unwrap()
             .sum()
             .unwrap();
+        println!("computed for i {:?}", i);
         total += *f;
     }
 
