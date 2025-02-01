@@ -23,8 +23,11 @@ fn main() -> Result<()> {
     let data = read_input_csv(&opts.input).wrap_err("failed to read input csv")?;
     let data = cut_data(data, &opts).wrap_err("failed to truncate the input dataset")?;
 
-    let mut writer = OutputWriter::new(&opts.output.with_extension("markers.csv"))
-        .wrap_err("failed to initialize output writer")?;
+    let mut writer =
+        OutputWriter::new(&opts.output).wrap_err("failed to initialize output writer")?;
+
+    let orca_full = OrcaFull;
+    let orca_sim = OrcaSim::new(&opts);
 
     // create marker set
     let mut markers = if let Some(initial_set_str) = opts.initial_set.as_ref() {
@@ -33,13 +36,19 @@ fn main() -> Result<()> {
         let markers = MarkerSet::from_initial_set(data, &opts, initial_set)
             .wrap_err("failed to use provided initial marker set")?;
 
-        // save the initial markers to file immediately
-        markers
-            .current_ids()
-            .into_iter()
-            .zip(markers.orcas.iter())
-            .map(|(id, orca)| writer.write_row(id, *orca))
-            .collect::<Result<Vec<()>>>()?;
+        // evaluate each iterative set
+        let full_evals = markers.evaluate_sets(orca_full);
+        let sim_evals = markers.evaluate_sets(orca_sim);
+
+        // and record it immediately
+        for i in 0..markers.cur.len() {
+            writer.write_row(
+                markers.ids[markers.cur[i] as usize].clone(),
+                markers.orcas[i],
+                full_evals[i],
+                sim_evals[i],
+            )?;
+        }
 
         markers
     } else {
@@ -52,18 +61,29 @@ fn main() -> Result<()> {
         // first search exhaustive for first r
         debug!("searching for first {} markers exhaustively", opts.r);
 
-        // save the markers to file immediately
-        markers
-            .search_exhaustive(OrcaFull)
-            .map(|(id, set_orca)| writer.write_row(id, set_orca))
-            .collect::<Result<Vec<()>>>()?; // force write for all
+        markers.search_exhaustive(OrcaFull);
+
+        // here also evaluate all subsets
+        // NOTE: these evaluations are purely for consistency
+        // as they make no sense: the whole set was found with exhaustive calculation,
+        // so it is unordered and evaluating addition of each marker is meaningless
+        let full_evals = markers.evaluate_sets(orca_full);
+        let sim_evals = markers.evaluate_sets(orca_sim);
+
+        // and write all rows
+        for i in 0..markers.cur.len() {
+            writer.write_row(
+                markers.ids[markers.cur[i] as usize].clone(),
+                markers.orcas[i],
+                full_evals[i],
+                sim_evals[i],
+            )?;
+        }
 
         markers
     };
 
     // then add the rest of the markers greedily
-    let orca_full = OrcaFull;
-    let orca_sim = OrcaSim::new(&opts);
 
     for _ in 0..(opts.nmarkers - opts.r) {
         let (id, marker_orca) = if markers.cur.len() < opts.full_orca_limit {
@@ -82,32 +102,11 @@ fn main() -> Result<()> {
             markers.add_greedy(orca_sim)
         };
 
+        let full_eval = markers.evaluate_current(orca_full);
+        let sim_eval = markers.evaluate_current(orca_sim);
+
         // write as soon as next marker is selected
-        writer.write_row(id, marker_orca)?;
-    }
-
-    // done, now evaluate
-    if !opts.no_eval {
-        #[derive(serde::Serialize)]
-        struct EvalRow {
-            id: String,
-            orca_full: f64,
-            orca_sim: f64,
-        }
-
-        let full_evals = markers.evaluate(orca_full);
-        let sim_evals = markers.evaluate(orca_sim);
-
-        let mut writer = csv::Writer::from_path(opts.output.with_extension("eval.csv"))?;
-
-        (0..markers.cur.len()).try_for_each(|i| -> Result<()> {
-            writer.serialize(EvalRow {
-                id: markers.ids[markers.cur[i] as usize].clone(),
-                orca_full: full_evals[i],
-                orca_sim: sim_evals[i],
-            })?;
-            Ok(())
-        })?;
+        writer.write_row(id, marker_orca, full_eval, sim_eval)?;
     }
 
     Ok(())

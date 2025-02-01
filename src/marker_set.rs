@@ -137,10 +137,7 @@ impl MarkerSet {
     }
 
     // returns best orca score for the chosen set
-    pub fn search_exhaustive<T: Orca + Sync>(
-        &mut self,
-        orca: T,
-    ) -> impl Iterator<Item = (String, f64)> + use<'_, T> {
+    pub fn search_exhaustive<T: Orca + Sync>(&mut self, orca: T) {
         let best = Arc::new(Mutex::new((0.0, vec![])));
 
         self.rest
@@ -166,11 +163,6 @@ impl MarkerSet {
         self.cur = best.1;
         self.orcas = self.cur.iter().map(|_| best.0).collect();
         self.rest.retain(|i| !self.cur.contains(i));
-
-        self.cur
-            .iter()
-            .zip(self.orcas.iter())
-            .map(|(&idx, &orca)| (self.ids[idx as usize].clone(), orca))
     }
 
     pub fn add_greedy<T: Orca + Sync>(&mut self, orca: T) -> (String, f64) {
@@ -201,7 +193,7 @@ impl MarkerSet {
         (id, best.0)
     }
 
-    pub fn evaluate(&self, orca: impl Orca + Sync) -> Vec<f64> {
+    pub fn evaluate_sets(&self, orca: impl Orca + Sync) -> Vec<f64> {
         // evaluation happens after best markers were selected
         assert!(!self.cur.is_empty());
 
@@ -212,6 +204,12 @@ impl MarkerSet {
                     .compute(self.markers.get_many(&self.cur[..=i]), &self.k_prior)
             })
             .collect()
+    }
+
+    // outputs full and sim evaluation of the current best set
+    pub fn evaluate_current(&self, orca: impl Orca + Sync) -> f64 {
+        orca.init()
+            .compute(self.markers.get_many(&self.cur), &self.k_prior)
     }
 }
 

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 pub struct Opts {
     #[arg(short, long, value_name = "PATH", help = "input csv file")]
     pub input: PathBuf,
-    #[arg(short, long, value_name = "PREFIX", help = "output file prefix")]
+    #[arg(short, long, value_name = "PATH", help = "output file")]
     pub output: PathBuf,
     #[arg(
         short,
@@ -41,12 +41,10 @@ pub struct Opts {
         help = "number of simulations for the simulation-based f_ORCA"
     )]
     pub nsim: usize,
-    #[arg(short, long, help = "do not evaluate best marker set")]
-    pub no_eval: bool,
     #[arg(
         long,
         value_name = "SET",
-        help = "ids of initial set of markers to use, comma-separated"
+        help = "ids of initial markers to use, comma-separated"
     )]
     pub initial_set: Option<String>,
     #[arg(

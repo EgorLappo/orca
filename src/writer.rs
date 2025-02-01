@@ -13,15 +13,45 @@ impl OutputWriter {
         Ok(OutputWriter { writer })
     }
 
-    pub fn write_row(&mut self, id: String, orca: f64) -> Result<()> {
+    pub fn write_row(
+        &mut self,
+        id: String,
+        orca_marker: f64,
+        orca_full: f64,
+        orca_sim: f64,
+    ) -> Result<()> {
         self.writer
-            .serialize(OutRow { id, orca })
+            .serialize(OutRow {
+                id,
+                orca_marker,
+                orca_full,
+                orca_sim,
+            })
             .wrap_err("failed to write output row")
+    }
+
+    pub fn write_rows(
+        &mut self,
+        mut rows: impl Iterator<Item = (String, f64, f64, f64)>,
+    ) -> Result<()> {
+        rows.try_for_each(|(id, orca_marker, orca_full, orca_sim)| {
+            self.writer
+                .serialize(OutRow {
+                    id,
+                    orca_marker,
+                    orca_full,
+                    orca_sim,
+                })
+                .wrap_err("failed to write output row")
+        })
     }
 }
 
+// little struct to write csv easier
 #[derive(Debug, serde::Serialize)]
 struct OutRow {
     id: String,
-    orca: f64,
+    orca_marker: f64,
+    orca_full: f64,
+    orca_sim: f64,
 }
