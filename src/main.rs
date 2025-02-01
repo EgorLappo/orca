@@ -1,5 +1,5 @@
 use clap::Parser;
-use color_eyre::eyre::{OptionExt, Result, WrapErr};
+use color_eyre::eyre::{bail, OptionExt, Result, WrapErr};
 use intmap::IntMap;
 use itertools::Itertools;
 use jemallocator::Jemalloc;
@@ -23,8 +23,6 @@ struct Opts {
     input: PathBuf,
     #[arg(short, long, value_name = "PREFIX", help = "output file prefix")]
     output: PathBuf,
-    #[arg(short, value_name = "K", help = "number of populations K")]
-    k: usize,
     #[arg(
         short,
         default_value_t = 2,
@@ -88,7 +86,7 @@ fn main() -> Result<()> {
     assert!(opts.nmarkers >= opts.r);
 
     // read input csv
-    let data = read_input_csv(&opts.input, opts.k).wrap_err("failed to read input csv")?;
+    let data = read_input_csv(&opts.input).wrap_err("failed to read input csv")?;
     let data = cut_data(data, &opts).wrap_err("failed to truncate the input dataset")?;
 
     let mut writer = OutputWriter::new(&opts.output.with_extension("markers.csv"))
@@ -120,7 +118,7 @@ fn main() -> Result<()> {
             "searching for {} best among {} markers in {} populations",
             opts.nmarkers,
             markers.markers.len(),
-            opts.k
+            markers.k
         );
 
         // first search exhaustive for first r
@@ -174,16 +172,14 @@ fn main() -> Result<()> {
 
         let mut writer = csv::Writer::from_path(opts.output.with_extension("eval.csv"))?;
 
-        (0..markers.cur.len())
-            .map(|i| -> Result<()> {
-                writer.serialize(EvalRow {
-                    id: markers.ids[markers.cur[i] as usize].clone(),
-                    orca_full: full_evals[i],
-                    orca_sim: sim_evals[i],
-                })?;
-                Ok(())
-            })
-            .collect::<Result<()>>()?;
+        (0..markers.cur.len()).try_for_each(|i| -> Result<()> {
+            writer.serialize(EvalRow {
+                id: markers.ids[markers.cur[i] as usize].clone(),
+                orca_full: full_evals[i],
+                orca_sim: sim_evals[i],
+            })?;
+            Ok(())
+        })?;
     }
 
     Ok(())
@@ -205,18 +201,21 @@ struct MarkerSet {
     markers: IntMap<u64, Vec<f64>>,
     // number of markers to consider for exhaustive searches
     r: usize,
+    // number of populations
+    k: usize,
     // prior probabilities of each population
     k_prior: Vec<f64>,
 }
 
 impl MarkerSet {
     fn new(data: DataFrame, opts: &Opts) -> Self {
+        let k = data.shape().1 - 2;
         let k_prior = if opts.prior {
             debug!("computing non-uniform prior for the population distribution");
-            cluster_proportions(&data, opts.k)
+            cluster_proportions(&data, k)
         } else {
             debug!("using uniform prior for the population distribution");
-            vec![1.0 / opts.k as f64; opts.k]
+            vec![1.0 / k as f64; k]
         };
 
         // store string ids sepatarely from data
@@ -232,7 +231,7 @@ impl MarkerSet {
         // store marker frequencies in a map
         let mut markers: IntMap<u64, Vec<f64>> = IntMap::with_capacity(data.height());
         for (j, row) in (0..data.height()).enumerate() {
-            let freqs = (0..opts.k)
+            let freqs = (0..k)
                 .map(|i| {
                     data.column(&format!("freq{}", i + 1))
                         .unwrap()
@@ -259,6 +258,7 @@ impl MarkerSet {
             rest: markers.keys().collect(),
             markers,
             r: opts.r,
+            k,
             k_prior,
         };
 
@@ -310,10 +310,10 @@ impl MarkerSet {
     }
 
     // returns best orca score for the chosen set
-    fn search_exhaustive<'a, T: Orca + Sync>(
-        &'a mut self,
+    fn search_exhaustive<T: Orca + Sync>(
+        &mut self,
         orca: T,
-    ) -> impl Iterator<Item = OutRow> + use<'a, T> {
+    ) -> impl Iterator<Item = OutRow> + use<'_, T> {
         let best = Arc::new(Mutex::new((0.0, vec![])));
 
         self.rest
@@ -379,7 +379,7 @@ impl MarkerSet {
 
     fn evaluate(&self, orca: impl Orca + Sync) -> Vec<f64> {
         // evaluation happens after best markers were selected
-        assert!(self.cur.len() > 0);
+        assert!(!self.cur.is_empty());
 
         // evaluation is essentially done by re-computing f_ORCA for the best set of markers
         (0..self.cur.len())
@@ -555,22 +555,47 @@ fn sim_coin(p: f64, rng: &mut SmallRng) -> f64 {
 
 // IO functions
 
-fn read_input_csv(input: &Path, k: usize) -> Result<DataFrame> {
+fn read_input_csv(input: &Path) -> Result<DataFrame> {
     let reader = CsvReadOptions::default()
         .with_has_header(true)
         .with_infer_schema_length(Some(10))
         .try_into_reader_with_file_path(Some(input.to_path_buf()))?;
 
+    // check that the right columns are present, and no others
+    let df = reader.finish().wrap_err(format!(
+        "couldn't read input csv file {} into dataframe",
+        input.display()
+    ))?;
+    let columns: Vec<&str> = df.get_columns().iter().map(|x| x.name().as_str()).collect();
+    let k = columns.len() - 2;
+
+    // check that id column is present
+    if !columns.iter().any(|&x| x == "id") {
+        bail!("cound not find column 'id' in input file");
+    }
+    // check freq column
+    if !columns.iter().any(|&x| x == "freq") {
+        bail!("cound not find column 'freq' in input file");
+    }
+
+    // check that the rest of the columns are in the format `freq{i}`
+    let freqi_re = regex::Regex::new(r"^freq\d+").unwrap();
+
+    for x in columns {
+        if (x != "id") & (x != "freq") & !freqi_re.is_match(x) {
+            bail!("unknown column in input file: {}", x);
+        }
+    }
+
+    // check that all freq{i} columns are present and in order
     let mut cols = vec!["id".to_string(), "freq".to_string()];
     for i in 0..k {
         cols.push(format!("freq{}", i + 1));
     }
 
-    let df = reader
-        .finish()
-        .wrap_err(format!("couldn't read input csv file {}", input.display()))?
+    let df = df
         .select(cols)
-        .wrap_err("couldn't find required columns in the input csv")?;
+        .wrap_err("freq{i} columns were not in order starting with i=1 in input file")?;
 
     Ok(df)
 }
@@ -631,7 +656,7 @@ impl OutputWriter {
     fn write_row(&mut self, row: &OutRow) -> Result<()> {
         self.writer
             .serialize(row)
-            .wrap_err_with(|| format!("failed to write row {:?}", row))
+            .wrap_err(format!("failed to write row {:?}", row))
     }
 }
 
