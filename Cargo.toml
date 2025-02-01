@@ -10,12 +10,12 @@ clap = { version = "4.5.27", features = ["derive"] }
 color-eyre = "0.6.3"
 csv = "1.3.1"
 env_logger = "0.11.6"
-intmap = "2.0.0"
-itertools = "0.12.1"
+intmap = "3.1"
+itertools = "0.14"
 jemallocator = "0.5.4"
 log = "0.4.25"
 parking_lot = "0.12.3"
-polars = { version = "0.37.0", features = ["performant"] }
-rand = { version = "0.8.5", features = ["small_rng"] }
+polars = { version = "0.46.0", features = ["performant"] }
+rand = { version = "0.9", features = ["small_rng"] }
 rayon = "1.10.0"
 serde = { version = "1.0.217", features = ["derive"] }

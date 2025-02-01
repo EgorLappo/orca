@@ -8,6 +8,7 @@ use parking_lot::Mutex;
 use polars::prelude::*;
 use rand::{prelude::*, rngs::SmallRng};
 use rayon::prelude::*;
+use std::fs::File;
 use std::marker::Sync;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,15 +19,16 @@ static GLOBAL: Jemalloc = Jemalloc;
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Compute f_ORCA for folklore markers", long_about = None)]
 struct Opts {
-    #[arg(short, long, help = "input csv file")]
+    #[arg(short, long, value_name = "PATH", help = "input csv file")]
     input: PathBuf,
-    #[arg(short, long, help = "output csv file")]
+    #[arg(short, long, value_name = "PREFIX", help = "output file prefix")]
     output: PathBuf,
-    #[arg(short, help = "number of populations K")]
+    #[arg(short, value_name = "K", help = "number of populations K")]
     k: usize,
     #[arg(
         short,
         default_value_t = 2,
+        value_name = "R",
         help = "number of markers for exhaustive search"
     )]
     r: usize,
@@ -40,7 +42,7 @@ struct Opts {
     #[arg(
         short,
         long,
-        help = "compute non-uniform prior for the population distribution"
+        help = "compute population prior based on proportion of present markers"
     )]
     prior: bool,
     #[arg(
@@ -52,19 +54,28 @@ struct Opts {
     #[arg(
         long,
         default_value_t = 10000,
+        value_name = "NSIM",
         help = "number of simulations for the simulation-based f_ORCA"
     )]
     nsim: usize,
-    #[arg(long, help = "ids of initial set of markers to use, comma-separated")]
+    #[arg(short, long, help = "do not evaluate best marker set")]
+    no_eval: bool,
+    #[arg(
+        long,
+        value_name = "SET",
+        help = "ids of initial set of markers to use, comma-separated"
+    )]
     initial_set: Option<String>,
     #[arg(
         long,
         default_value_t = 24,
+        value_name = "LIMIT",
         help = "maximal number of markers for full ORCA computation"
     )]
     full_orca_limit: usize,
     #[arg(
         long,
+        value_name = "PATH",
         help = "compute and save evaluation of each single marker to a provided file"
     )]
     single_marker_eval: Option<PathBuf>,
@@ -80,12 +91,29 @@ fn main() -> Result<()> {
     let data = read_input_csv(&opts.input, opts.k).wrap_err("failed to read input csv")?;
     let data = cut_data(data, &opts).wrap_err("failed to truncate the input dataset")?;
 
+    let mut writer = OutputWriter::new(&opts.output.with_extension("markers.csv"))
+        .wrap_err("failed to initialize output writer")?;
+
     // create marker set
     let mut markers = if let Some(initial_set_str) = opts.initial_set.as_ref() {
         debug!("using provided initial marker set {}", initial_set_str);
         let initial_set = initial_set_str.split(',').collect::<Vec<_>>();
-        MarkerSet::from_initial_set(data, &opts, initial_set)
-            .wrap_err("failed to use provided initial marker set")?
+        let markers = MarkerSet::from_initial_set(data, &opts, initial_set)
+            .wrap_err("failed to use provided initial marker set")?;
+
+        // save the initial markers to file immediately
+        markers
+            .current_ids()
+            .iter()
+            .zip(markers.orcas.iter())
+            .map(|(id, orca)| OutRow {
+                id: id.clone(),
+                orca: *orca,
+            })
+            .map(|row| writer.write_row(&row))
+            .collect::<Result<Vec<()>>>()?;
+
+        markers
     } else {
         let mut markers = MarkerSet::new(data, &opts);
         debug!(
@@ -97,7 +125,12 @@ fn main() -> Result<()> {
 
         // first search exhaustive for first r
         debug!("searching for first {} markers exhaustively", opts.r);
-        markers.search_exhaustive(OrcaFull);
+
+        // save the markers to file immediately
+        markers
+            .search_exhaustive(OrcaFull)
+            .map(|row| writer.write_row(&row))
+            .collect::<Result<Vec<()>>>()?; // force write for all
 
         markers
     };
@@ -107,29 +140,56 @@ fn main() -> Result<()> {
     let orca_sim = OrcaSim::new(&opts);
 
     for _ in 0..(opts.nmarkers - opts.r) {
-        if markers.cur.len() < opts.full_orca_limit {
+        let row = if markers.cur.len() < opts.full_orca_limit {
             debug!(
                 "adding marker {}/{} using exhaustive f_ORCA computation",
                 markers.cur.len() + 1,
                 opts.nmarkers
             );
-            markers.add_greedy(orca_full);
+            markers.add_greedy(orca_full)
         } else {
             debug!(
                 "adding marker {}/{} using simulation f_ORCA computation",
                 markers.cur.len() + 1,
                 opts.nmarkers
             );
-            markers.add_greedy(orca_sim);
-        }
+            markers.add_greedy(orca_sim)
+        };
+
+        // write as soon as next marker is selected
+        writer.write_row(&row)?;
     }
 
-    // save results
-    write_output(&markers, &opts.output).wrap_err("failed to write output csv")?;
+    // done, now evaluate
+    if !opts.no_eval {
+        #[derive(serde::Serialize)]
+        struct EvalRow {
+            id: String,
+            orca_full: f64,
+            orca_sim: f64,
+        }
+
+        let full_evals = markers.evaluate(orca_full);
+        let sim_evals = markers.evaluate(orca_sim);
+
+        let mut writer = csv::Writer::from_path(opts.output.with_extension("eval.csv"))?;
+
+        (0..markers.cur.len())
+            .map(|i| -> Result<()> {
+                writer.serialize(EvalRow {
+                    id: markers.ids[markers.cur[i] as usize].clone(),
+                    orca_full: full_evals[i],
+                    orca_sim: sim_evals[i],
+                })?;
+                Ok(())
+            })
+            .collect::<Result<()>>()?;
+    }
 
     Ok(())
 }
 
+#[derive(Debug, Clone)]
 struct MarkerSet {
     // actual marker labels for printing/output
     ids: Vec<String>,
@@ -142,7 +202,7 @@ struct MarkerSet {
     // remaining markers to search over
     rest: Vec<u64>,
     // marker frequencies in each of the populations
-    markers: IntMap<Vec<f64>>,
+    markers: IntMap<u64, Vec<f64>>,
     // number of markers to consider for exhaustive searches
     r: usize,
     // prior probabilities of each population
@@ -170,7 +230,7 @@ impl MarkerSet {
             .collect::<Vec<_>>();
 
         // store marker frequencies in a map
-        let mut markers: IntMap<Vec<f64>> = IntMap::with_capacity(data.height());
+        let mut markers: IntMap<u64, Vec<f64>> = IntMap::with_capacity(data.height());
         for (j, row) in (0..data.height()).enumerate() {
             let freqs = (0..opts.k)
                 .map(|i| {
@@ -188,7 +248,7 @@ impl MarkerSet {
         // make sure all entries in markers are 0 <= x <= 1
         for (_, freqs) in markers.iter_mut() {
             for f in freqs.iter_mut() {
-                *f = f.max(0.0).min(1.0);
+                *f = f.clamp(0.0, 1.0);
             }
         }
 
@@ -196,7 +256,7 @@ impl MarkerSet {
             ids,
             cur: vec![],
             orcas: vec![],
-            rest: markers.keys().copied().collect(),
+            rest: markers.keys().collect(),
             markers,
             r: opts.r,
             k_prior,
@@ -250,8 +310,10 @@ impl MarkerSet {
     }
 
     // returns best orca score for the chosen set
-    fn search_exhaustive(&mut self, orca: impl Orca + Sync) -> f64 {
-        // NOTE: could be done with RwLock instead but i don't see the reason
+    fn search_exhaustive<'a, T: Orca + Sync>(
+        &'a mut self,
+        orca: T,
+    ) -> impl Iterator<Item = OutRow> + use<'a, T> {
         let best = Arc::new(Mutex::new((0.0, vec![])));
 
         self.rest
@@ -278,10 +340,16 @@ impl MarkerSet {
         self.orcas = self.cur.iter().map(|_| best.0).collect();
         self.rest.retain(|i| !self.cur.contains(i));
 
-        best.0
+        self.cur
+            .iter()
+            .zip(self.orcas.iter())
+            .map(|(&idx, &orca)| OutRow {
+                id: self.ids[idx as usize].clone(),
+                orca,
+            })
     }
 
-    fn add_greedy(&mut self, orca: impl Orca + Sync) -> f64 {
+    fn add_greedy<T: Orca + Sync>(&mut self, orca: T) -> OutRow {
         let best = Arc::new(Mutex::new((0.0, 0)));
 
         self.rest.clone().into_par_iter().for_each_init(
@@ -304,7 +372,22 @@ impl MarkerSet {
         self.orcas.push(best.0);
         self.rest.retain(|i| *i != best.1);
 
-        best.0
+        let id = self.ids[best.1 as usize].clone();
+        debug!("greedily added marker {} to best set", id);
+        OutRow { id, orca: best.0 }
+    }
+
+    fn evaluate(&self, orca: impl Orca + Sync) -> Vec<f64> {
+        // evaluation happens after best markers were selected
+        assert!(self.cur.len() > 0);
+
+        // evaluation is essentially done by re-computing f_ORCA for the best set of markers
+        (0..self.cur.len())
+            .map(|i| {
+                orca.init()
+                    .compute(self.markers.get_many(&self.cur[..=i]), &self.k_prior)
+            })
+            .collect()
     }
 }
 
@@ -375,7 +458,7 @@ impl Orca for OrcaSim {
     fn init(&self) -> OrcaSimState {
         OrcaSimState {
             nsim: self.nsim,
-            rng: SmallRng::from_entropy(),
+            rng: SmallRng::from_os_rng(),
         }
     }
 }
@@ -451,7 +534,7 @@ impl OrcaState for OrcaSimState {
 
 // math/computation helper functions
 fn sim_with_proportions(p: &[f64], rng: &mut SmallRng) -> usize {
-    let mut r = rng.gen_range(0.0..1.0);
+    let mut r = rng.random_range(0.0..1.0);
     for (i, &x) in p.iter().enumerate() {
         r -= x;
         if r < 0.0 {
@@ -463,7 +546,7 @@ fn sim_with_proportions(p: &[f64], rng: &mut SmallRng) -> usize {
 
 fn sim_coin(p: f64, rng: &mut SmallRng) -> f64 {
     let p = p.clamp(0.0, 1.0);
-    if rng.gen_bool(p) {
+    if rng.random_bool(p) {
         1.0
     } else {
         0.0
@@ -473,10 +556,10 @@ fn sim_coin(p: f64, rng: &mut SmallRng) -> f64 {
 // IO functions
 
 fn read_input_csv(input: &Path, k: usize) -> Result<DataFrame> {
-    let reader = CsvReader::from_path(input)?
-        .has_header(true)
-        .infer_schema(Some(10))
-        .finish()?;
+    let reader = CsvReadOptions::default()
+        .with_has_header(true)
+        .with_infer_schema_length(Some(10))
+        .try_into_reader_with_file_path(Some(input.to_path_buf()))?;
 
     let mut cols = vec!["id".to_string(), "freq".to_string()];
     for i in 0..k {
@@ -484,33 +567,12 @@ fn read_input_csv(input: &Path, k: usize) -> Result<DataFrame> {
     }
 
     let df = reader
+        .finish()
+        .wrap_err(format!("couldn't read input csv file {}", input.display()))?
         .select(cols)
         .wrap_err("couldn't find required columns in the input csv")?;
 
     Ok(df)
-}
-
-fn write_output(markers: &MarkerSet, output: &Path) -> Result<()> {
-    #[derive(serde::Serialize)]
-    struct OutRow {
-        id: String,
-        orca: f64,
-    }
-
-    let mut writer = csv::Writer::from_path(output)?;
-
-    markers
-        .current_ids()
-        .iter()
-        .zip(markers.orcas.iter())
-        .map(|(id, orca)| OutRow {
-            id: id.clone(),
-            orca: *orca,
-        })
-        .map(|row| writer.serialize(row))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(())
 }
 
 fn cut_data(data: DataFrame, opts: &Opts) -> Result<DataFrame> {
@@ -523,7 +585,12 @@ fn cut_data(data: DataFrame, opts: &Opts) -> Result<DataFrame> {
         }
 
         // sort data by freq and keep the top cut rows
-        Ok(data.sort(["freq"], true, false)?.head(Some(cut)))
+        Ok(data
+            .sort(
+                ["freq"],
+                SortMultipleOptions::new().with_order_descending(true),
+            )?
+            .head(Some(cut)))
     } else {
         Ok(data)
     }
@@ -537,12 +604,41 @@ fn cluster_proportions(data: &DataFrame, k: usize) -> Vec<f64> {
         *f = data
             .column(&format!("freq{}", i + 1))
             .unwrap()
-            .sum()
+            .sum_reduce()
+            .unwrap()
+            .value()
+            .try_extract::<f64>()
             .unwrap();
         total += *f;
     }
 
     freqs.into_iter().map(|x| x / total).collect()
+}
+
+// output infrastructure
+
+struct OutputWriter {
+    writer: csv::Writer<File>,
+}
+
+impl OutputWriter {
+    fn new(output: &Path) -> Result<Self> {
+        let writer = csv::Writer::from_path(output)?;
+
+        Ok(OutputWriter { writer })
+    }
+
+    fn write_row(&mut self, row: &OutRow) -> Result<()> {
+        self.writer
+            .serialize(row)
+            .wrap_err_with(|| format!("failed to write row {:?}", row))
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct OutRow {
+    id: String,
+    orca: f64,
 }
 
 // extras for convenience
@@ -554,8 +650,10 @@ trait GetMany<T> {
         I: IntoIterator<Item = &'a u64>;
 }
 
-impl<T> GetMany<T> for IntMap<T> {
+impl<T> GetMany<T> for IntMap<u64, T> {
     fn get_many<'a, I>(&'a self, indices: I) -> Vec<&'a T>
+    // NOTE for future self: we have to allocate into a Vec here because
+    // orca computations require multiple passes over the values
     where
         I: IntoIterator<Item = &'a u64>,
     {
