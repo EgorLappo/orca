@@ -2,7 +2,7 @@ use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Compute f_ORCA for folklore markers", long_about = None)]
+#[command(author, version, about = "Compute f_ORCA following Rosenberg (2005)", long_about = None)]
 pub struct Opts {
     #[arg(short, long, value_name = "PATH", help = "input csv file")]
     pub input: PathBuf,
