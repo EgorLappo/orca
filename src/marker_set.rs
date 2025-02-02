@@ -1,9 +1,9 @@
-use color_eyre::eyre::{OptionExt, Result};
+use color_eyre::eyre::{OptionExt, Result, WrapErr};
 use intmap::IntMap;
 use itertools::Itertools;
 use log::debug;
 use parking_lot::Mutex;
-use polars::prelude::DataFrame;
+use polars::prelude::{DataFrame, DataType};
 use rayon::prelude::*;
 use std::sync::Arc;
 
@@ -34,7 +34,7 @@ pub struct MarkerSet {
 }
 
 impl MarkerSet {
-    pub fn new(data: DataFrame, opts: &Opts) -> Self {
+    pub fn new(data: DataFrame, opts: &Opts) -> Result<Self> {
         let k = data.shape().1 - 2;
         let k_prior = if opts.prior {
             debug!("computing non-uniform prior for the population distribution");
@@ -44,12 +44,19 @@ impl MarkerSet {
             vec![1.0 / k as f64; k]
         };
 
+        // here and below we kind of repeat data validation with unwrap
+        // it all should work out if the dataframe was created by us in main
+
         // store string ids sepatarely from data
-        let ids = data
-            .column("id")
-            .unwrap()
+        let ids = data.column("id").wrap_err("failed to find column 'id'")?;
+        let ids = ids
+            .cast(&DataType::String)
+            .wrap_err("failed to cast 'id' to string")?;
+        let ids = ids
             .str()
-            .unwrap()
+            .wrap_err("error obtaining str array from column 'id'")?;
+
+        let ids = ids
             .into_iter()
             .map(|x| x.unwrap().to_string())
             .collect::<Vec<_>>();
@@ -58,15 +65,24 @@ impl MarkerSet {
         let mut markers: IntMap<u64, Vec<f64>> = IntMap::with_capacity(data.height());
         for (j, row) in (0..data.height()).enumerate() {
             let freqs = (0..k)
-                .map(|i| {
-                    data.column(&format!("freq{}", i + 1))
-                        .unwrap()
-                        .f64()
-                        .unwrap()
-                        .get(row)
-                        .unwrap()
+                .map(|i| -> Result<f64> {
+                    let column = data
+                        .column(&format!("freq{}", i + 1))
+                        .wrap_err(format!("missing column 'freq{}'", i))?;
+                    let column = column
+                        .cast(&DataType::Float64)
+                        .wrap_err(format!("column {:?} cannot be cast as f64", column))?;
+                    let column = column.f64().wrap_err(format!(
+                        "error obtaining f64 array from column {:?}",
+                        column
+                    ))?;
+                    let row = column.get(row).ok_or_eyre(format!(
+                        "failed to get row {:?} from column {:?}",
+                        row, column
+                    ))?;
+                    Ok(row)
                 })
-                .collect::<_>();
+                .collect::<Result<Vec<f64>>>()?;
             markers.insert(j as u64, freqs);
         }
 
@@ -89,27 +105,11 @@ impl MarkerSet {
             k_prior,
         };
 
-        if let Some(single_marker_eval) = opts.single_marker_eval.as_ref() {
-            debug!(
-                "saving single marker evaluation to {}",
-                single_marker_eval.display()
-            );
-            let orca = OrcaFull;
-            let mut writer = csv::Writer::from_path(single_marker_eval).unwrap();
-            for (i, id) in marker_set.ids.iter().enumerate() {
-                let orca = orca.init().compute(
-                    marker_set.markers.get_many(&[i as u64]),
-                    &marker_set.k_prior,
-                );
-                writer.serialize((id, orca)).unwrap();
-            }
-        }
-
-        marker_set
+        Ok(marker_set)
     }
 
     pub fn from_initial_set(data: DataFrame, opts: &Opts, initial_set: Vec<&str>) -> Result<Self> {
-        let mut markers = MarkerSet::new(data, opts);
+        let mut markers = MarkerSet::new(data, opts).wrap_err("failed to initialize MarkerSet")?;
         // get indices of the initial set, checking that they are all present
         let initial_indices = initial_set
             .iter()

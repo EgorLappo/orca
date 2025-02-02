@@ -52,7 +52,7 @@ fn main() -> Result<()> {
 
         markers
     } else {
-        let mut markers = MarkerSet::new(data, &opts);
+        let mut markers = MarkerSet::new(data, &opts).wrap_err("failed to initialize MarkerSet")?;
         debug!(
             "searching for {} best among {} markers in {} populations",
             opts.nmarkers, markers.n, markers.k
