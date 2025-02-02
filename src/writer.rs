@@ -27,7 +27,9 @@ impl OutputWriter {
                 orca_full,
                 orca_sim,
             })
-            .wrap_err("failed to write output row")
+            .wrap_err("failed to write output row")?;
+        self.writer.flush().wrap_err("failed to flush writer")?;
+        Ok(())
     }
 
     pub fn write_rows(
