@@ -104,7 +104,7 @@ fn main() -> Result<()> {
             markers.add_greedy(orca_sim)
         };
 
-        let full_eval = if markers.cur.len() < opts.full_orca_eval_limit {
+        let full_eval = if markers.cur.len() <= opts.full_orca_eval_limit {
             Some(markers.evaluate_current(orca_full))
         } else {
             None

@@ -210,7 +210,7 @@ impl MarkerSet {
         // evaluation is essentially done by re-computing f_ORCA for the best set of markers
         (0..self.cur.len())
             .map(|i| {
-                if i > lim {
+                if i >= lim {
                     None
                 } else {
                     let eval = orca
