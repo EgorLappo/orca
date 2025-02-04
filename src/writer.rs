@@ -17,8 +17,8 @@ impl OutputWriter {
         &mut self,
         id: String,
         orca_marker: f64,
-        orca_full: f64,
-        orca_sim: f64,
+        orca_full: Option<f64>,
+        orca_sim: Option<f64>,
     ) -> Result<()> {
         self.writer
             .serialize(OutRow {
@@ -34,7 +34,7 @@ impl OutputWriter {
 
     pub fn write_rows(
         &mut self,
-        mut rows: impl Iterator<Item = (String, f64, f64, f64)>,
+        mut rows: impl Iterator<Item = (String, f64, Option<f64>, Option<f64>)>,
     ) -> Result<()> {
         rows.try_for_each(|(id, orca_marker, orca_full, orca_sim)| {
             self.writer
@@ -54,6 +54,6 @@ impl OutputWriter {
 struct OutRow {
     id: String,
     orca_marker: f64,
-    orca_full: f64,
-    orca_sim: f64,
+    orca_full: Option<f64>,
+    orca_sim: Option<f64>,
 }

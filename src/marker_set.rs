@@ -193,15 +193,31 @@ impl MarkerSet {
         (id, best.0)
     }
 
-    pub fn evaluate_sets(&self, orca: impl Orca + Sync) -> Vec<f64> {
+    pub fn evaluate_sets(
+        &self,
+        orca: impl Orca + Sync,
+        eval_limit: Option<usize>,
+    ) -> Vec<Option<f64>> {
         // evaluation happens after best markers were selected
         assert!(!self.cur.is_empty());
+
+        let lim = if let Some(l) = eval_limit {
+            l
+        } else {
+            self.cur.len()
+        };
 
         // evaluation is essentially done by re-computing f_ORCA for the best set of markers
         (0..self.cur.len())
             .map(|i| {
-                orca.init()
-                    .compute(self.markers.get_many(&self.cur[..=i]), &self.k_prior)
+                if i > lim {
+                    None
+                } else {
+                    let eval = orca
+                        .init()
+                        .compute(self.markers.get_many(&self.cur[..=i]), &self.k_prior);
+                    Some(eval)
+                }
             })
             .collect()
     }

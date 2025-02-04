@@ -37,8 +37,9 @@ fn main() -> Result<()> {
             .wrap_err("failed to use provided initial marker set")?;
 
         // evaluate each iterative set
-        let full_evals = markers.evaluate_sets(orca_full);
-        let sim_evals = markers.evaluate_sets(orca_sim);
+        let eval_limit = opts.full_orca_eval_limit;
+        let full_evals = markers.evaluate_sets(orca_full, Some(eval_limit));
+        let sim_evals = markers.evaluate_sets(orca_sim, None);
 
         // and record it immediately
         for i in 0..markers.cur.len() {
@@ -67,8 +68,9 @@ fn main() -> Result<()> {
         // NOTE: these evaluations are purely for consistency
         // as they make no sense: the whole set was found with exhaustive calculation,
         // so it is unordered and evaluating addition of each marker is meaningless
-        let full_evals = markers.evaluate_sets(orca_full);
-        let sim_evals = markers.evaluate_sets(orca_sim);
+        let eval_limit = opts.full_orca_eval_limit;
+        let full_evals = markers.evaluate_sets(orca_full, Some(eval_limit));
+        let sim_evals = markers.evaluate_sets(orca_sim, None);
 
         // and write all rows
         for i in 0..markers.cur.len() {
@@ -86,7 +88,7 @@ fn main() -> Result<()> {
     // then add the rest of the markers greedily
 
     for _ in 0..(opts.nmarkers - opts.r) {
-        let (id, marker_orca) = if markers.cur.len() < opts.full_orca_limit {
+        let (id, marker_orca) = if markers.cur.len() < opts.full_orca_search_limit {
             debug!(
                 "adding marker {}/{} using exhaustive f_ORCA computation",
                 markers.cur.len() + 1,
@@ -102,8 +104,12 @@ fn main() -> Result<()> {
             markers.add_greedy(orca_sim)
         };
 
-        let full_eval = markers.evaluate_current(orca_full);
-        let sim_eval = markers.evaluate_current(orca_sim);
+        let full_eval = if markers.cur.len() < opts.full_orca_eval_limit {
+            Some(markers.evaluate_current(orca_full))
+        } else {
+            None
+        };
+        let sim_eval = Some(markers.evaluate_current(orca_sim));
 
         // write as soon as next marker is selected
         writer.write_row(id, marker_orca, full_eval, sim_eval)?;

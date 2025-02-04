@@ -48,12 +48,21 @@ pub struct Opts {
     )]
     pub initial_set: Option<String>,
     #[arg(
+        short = 's',
         long,
         default_value_t = 24,
         value_name = "LIMIT",
-        help = "maximal number of markers for full ORCA computation"
+        help = "max marker set size for full ORCA computation"
     )]
-    pub full_orca_limit: usize,
+    pub full_orca_search_limit: usize,
+    #[arg(
+        short = 'e',
+        long,
+        default_value_t = 24,
+        value_name = "LIMIT",
+        help = "max marker set size for full ORCA computation during evaluation"
+    )]
+    pub full_orca_eval_limit: usize,
     #[arg(
         long,
         value_name = "PATH",
