@@ -13,47 +13,28 @@ impl OutputWriter {
         Ok(OutputWriter { writer })
     }
 
-    pub fn write_row(
-        &mut self,
-        id: String,
-        orca_marker: f64,
-        orca_full: Option<f64>,
-        orca_sim: Option<f64>,
-    ) -> Result<()> {
+    pub fn write_row(&mut self, row: OutRow) -> Result<()> {
         self.writer
-            .serialize(OutRow {
-                id,
-                orca_marker,
-                orca_full,
-                orca_sim,
-            })
+            .serialize(row)
             .wrap_err("failed to write output row")?;
         self.writer.flush().wrap_err("failed to flush writer")?;
         Ok(())
     }
 
-    pub fn write_rows(
-        &mut self,
-        mut rows: impl Iterator<Item = (String, f64, Option<f64>, Option<f64>)>,
-    ) -> Result<()> {
-        rows.try_for_each(|(id, orca_marker, orca_full, orca_sim)| {
+    pub fn write_rows(&mut self, mut rows: impl Iterator<Item = OutRow>) -> Result<()> {
+        rows.try_for_each(|row| {
             self.writer
-                .serialize(OutRow {
-                    id,
-                    orca_marker,
-                    orca_full,
-                    orca_sim,
-                })
+                .serialize(row)
                 .wrap_err("failed to write output row")
         })
     }
 }
 
 // little struct to write csv easier
-#[derive(Debug, serde::Serialize)]
-struct OutRow {
-    id: String,
-    orca_marker: f64,
-    orca_full: Option<f64>,
-    orca_sim: Option<f64>,
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
+pub struct OutRow {
+    pub id: String,
+    pub orca_marker: f64,
+    pub orca_full: Option<f64>,
+    pub orca_sim: Option<f64>,
 }

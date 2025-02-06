@@ -47,7 +47,7 @@ impl MarkerSet {
         // here and below we kind of repeat data validation with unwrap
         // it all should work out if the dataframe was created by us in main
 
-        // store string ids sepatarely from data
+        // store string ids separately from data
         let ids = data.column("id").wrap_err("failed to find column 'id'")?;
         let ids = ids
             .cast(&DataType::String)
@@ -108,7 +108,12 @@ impl MarkerSet {
         Ok(marker_set)
     }
 
-    pub fn from_initial_set(data: DataFrame, opts: &Opts, initial_set: Vec<&str>) -> Result<Self> {
+    pub fn from_initial_set(
+        data: DataFrame,
+        opts: &Opts,
+        initial_set: Vec<&str>,
+        initial_orcas: Option<Vec<f64>>,
+    ) -> Result<Self> {
         let mut markers = MarkerSet::new(data, opts).wrap_err("failed to initialize MarkerSet")?;
         // get indices of the initial set, checking that they are all present
         let initial_indices = initial_set
@@ -123,7 +128,12 @@ impl MarkerSet {
             .collect::<Result<Vec<_>>>()?;
 
         markers.cur = initial_indices.iter().copied().map(|x| x as u64).collect();
-        markers.orcas = vec![0.0; initial_set.len()];
+        markers.orcas = if let Some(orcas) = initial_orcas {
+            assert!(orcas.len() == initial_set.len());
+            orcas.clone()
+        } else {
+            vec![0.0; initial_set.len()]
+        };
         markers.rest.retain(|i| !markers.cur.contains(i));
 
         Ok(markers)

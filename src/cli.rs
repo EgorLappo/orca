@@ -63,10 +63,6 @@ pub struct Opts {
         help = "max marker set size for full ORCA computation during evaluation"
     )]
     pub full_orca_eval_limit: usize,
-    #[arg(
-        long,
-        value_name = "PATH",
-        help = "compute and save evaluation of each single marker to a provided file"
-    )]
-    pub single_marker_eval: Option<PathBuf>,
+    #[arg(long, help = "resume computation if output file already exists")]
+    pub resume: bool,
 }

@@ -1,5 +1,6 @@
 use clap::Parser;
 use color_eyre::eyre::{bail, Result, WrapErr};
+use csv;
 use jemallocator::Jemalloc;
 use log::debug;
 use polars::prelude::*;
@@ -8,7 +9,7 @@ use std::path::Path;
 use orca::cli::Opts;
 use orca::marker_set::MarkerSet;
 use orca::orca::{OrcaFull, OrcaSim};
-use orca::writer::OutputWriter;
+use orca::writer::{OutRow, OutputWriter};
 
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
@@ -23,36 +24,60 @@ fn main() -> Result<()> {
     let data = read_input_csv(&opts.input).wrap_err("failed to read input csv")?;
     let data = cut_data(data, &opts).wrap_err("failed to truncate the input dataset")?;
 
+    // first we try to read output and load its contents...
+    let resume = try_resume(&opts);
+
+    // ... so now it doesn't matter if it is overwritten
+    // writing is cheap here as there are rarely more than ~couple hundred lines,
+    // and we don't have to bother with appending
     let mut writer =
         OutputWriter::new(&opts.output).wrap_err("failed to initialize output writer")?;
 
     let orca_full = OrcaFull;
     let orca_sim = OrcaSim::new(&opts);
 
-    // create marker set
-    let mut markers = if let Some(initial_set_str) = opts.initial_set.as_ref() {
+    // try to resume computation from already existing file.
+    let mut markers = if let Some(rows) = resume {
+        let initial_set = rows.iter().map(|x| &x.id as &str).collect();
+        let initial_orcas = rows.iter().map(|x| x.orca_marker).collect();
+
+        let markers = MarkerSet::from_initial_set(data, &opts, initial_set, Some(initial_orcas))?;
+
+        // rewrite the output file immediately (see comment above)
+        writer
+            .write_rows(rows.iter().cloned())
+            .wrap_err("failed to re-write rows after resuming")?;
+
+        markers
+    }
+    // if resuming is not available, check if we are provided with an initial set
+    else if let Some(initial_set_str) = opts.initial_set.as_ref() {
         debug!("using provided initial marker set {}", initial_set_str);
         let initial_set = initial_set_str.split(',').collect::<Vec<_>>();
-        let markers = MarkerSet::from_initial_set(data, &opts, initial_set)
+        let markers = MarkerSet::from_initial_set(data, &opts, initial_set, None)
             .wrap_err("failed to use provided initial marker set")?;
 
-        // evaluate each iterative set
-        let eval_limit = opts.full_orca_eval_limit;
-        let full_evals = markers.evaluate_sets(orca_full, Some(eval_limit));
+        // in this case, we have to evaluate each iterative set
+        let full_evals = markers.evaluate_sets(orca_full, Some(opts.full_orca_eval_limit));
         let sim_evals = markers.evaluate_sets(orca_sim, None);
 
         // and record it immediately
         for i in 0..markers.cur.len() {
-            writer.write_row(
-                markers.ids[markers.cur[i] as usize].clone(),
-                markers.orcas[i],
-                full_evals[i],
-                sim_evals[i],
-            )?;
+            writer
+                .write_row(OutRow {
+                    id: markers.ids[markers.cur[i] as usize].clone(),
+                    orca_marker: markers.orcas[i],
+                    orca_full: full_evals[i],
+                    orca_sim: sim_evals[i],
+                })
+                .wrap_err("failed to write rows when starting from initial set")?;
         }
 
         markers
-    } else {
+    }
+    // finally, if we cannot resume or use a provided set,
+    // run exhaustive computation from scratch
+    else {
         let mut markers = MarkerSet::new(data, &opts).wrap_err("failed to initialize MarkerSet")?;
         debug!(
             "searching for {} best among {} markers in {} populations",
@@ -73,13 +98,16 @@ fn main() -> Result<()> {
         let sim_evals = markers.evaluate_sets(orca_sim, None);
 
         // and write all rows
+
         for i in 0..markers.cur.len() {
-            writer.write_row(
-                markers.ids[markers.cur[i] as usize].clone(),
-                markers.orcas[i],
-                full_evals[i],
-                sim_evals[i],
-            )?;
+            writer
+                .write_row(OutRow {
+                    id: markers.ids[markers.cur[i] as usize].clone(),
+                    orca_marker: markers.orcas[i],
+                    orca_full: full_evals[i],
+                    orca_sim: sim_evals[i],
+                })
+                .wrap_err("failed to write result after exhaustive search")?;
         }
 
         markers
@@ -87,8 +115,8 @@ fn main() -> Result<()> {
 
     // then add the rest of the markers greedily
 
-    for _ in 0..(opts.nmarkers - opts.r) {
-        let (id, marker_orca) = if markers.cur.len() < opts.full_orca_search_limit {
+    for _ in 0..(opts.nmarkers - markers.cur.len()) {
+        let (id, orca_marker) = if markers.cur.len() < opts.full_orca_search_limit {
             debug!(
                 "adding marker {}/{} using exhaustive f_ORCA computation",
                 markers.cur.len() + 1,
@@ -104,15 +132,20 @@ fn main() -> Result<()> {
             markers.add_greedy(orca_sim)
         };
 
-        let full_eval = if markers.cur.len() <= opts.full_orca_eval_limit {
+        let orca_full = if markers.cur.len() <= opts.full_orca_eval_limit {
             Some(markers.evaluate_current(orca_full))
         } else {
             None
         };
-        let sim_eval = Some(markers.evaluate_current(orca_sim));
+        let orca_sim = Some(markers.evaluate_current(orca_sim));
 
         // write as soon as next marker is selected
-        writer.write_row(id, marker_orca, full_eval, sim_eval)?;
+        writer.write_row(OutRow {
+            id,
+            orca_marker,
+            orca_full,
+            orca_sim,
+        })?;
     }
 
     Ok(())
@@ -163,6 +196,41 @@ fn read_input_csv(input: &Path) -> Result<DataFrame> {
         .wrap_err("freq{i} columns were not in order starting with i=1 in input file")?;
 
     Ok(df)
+}
+
+fn try_resume(opts: &Opts) -> Option<Vec<OutRow>> {
+    // the logic is that we return an option where None means we do not resume,
+    // and Some provides data to resume: current markers and current orcas
+
+    // don't resume if not asked for
+    if !opts.resume {
+        None
+    }
+    // don't resume if file does not exist
+    // note that we do this before initializing the writer in main
+    else if !opts.output.exists() {
+        debug!(
+            "failed to resume computation: output file {} does not exist",
+            opts.output.display()
+        );
+        None
+    } else {
+        // try to make file reader
+        if let Ok(mut reader) = csv::Reader::from_path(opts.output.clone()) {
+            let rows: Vec<_> = reader.deserialize().filter_map(|r| r.ok()).collect();
+
+            if !rows.is_empty() {
+                debug!("resuming computation with {} rows", rows.len());
+                Some(rows)
+            } else {
+                debug!("failed to resume computation: empty table");
+                None
+            }
+        } else {
+            debug!("failed to resume computation: cannot create reader");
+            None
+        }
+    }
 }
 
 fn cut_data(data: DataFrame, opts: &Opts) -> Result<DataFrame> {
