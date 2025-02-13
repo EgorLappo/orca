@@ -1,6 +1,5 @@
 use clap::Parser;
 use color_eyre::eyre::{bail, Result, WrapErr};
-use csv;
 use jemallocator::Jemalloc;
 use log::debug;
 use polars::prelude::*;
@@ -193,7 +192,7 @@ fn read_input_csv(input: &Path) -> Result<DataFrame> {
 
     let df = df
         .select(cols)
-        .wrap_err("freq{i} columns were not in order starting with i=1 in input file")?;
+        .wrap_err("freq[i] columns were not in order starting with i=1 in input file")?;
 
     Ok(df)
 }
@@ -216,7 +215,7 @@ fn try_resume(opts: &Opts) -> Option<Vec<OutRow>> {
         None
     } else {
         // try to make file reader
-        if let Ok(mut reader) = csv::Reader::from_path(opts.output.clone()) {
+        match csv::Reader::from_path(opts.output.clone()) { Ok(mut reader) => {
             let rows: Vec<_> = reader.deserialize().filter_map(|r| r.ok()).collect();
 
             if !rows.is_empty() {
@@ -226,10 +225,10 @@ fn try_resume(opts: &Opts) -> Option<Vec<OutRow>> {
                 debug!("failed to resume computation: empty table");
                 None
             }
-        } else {
+        } _ => {
             debug!("failed to resume computation: cannot create reader");
             None
-        }
+        }}
     }
 }
 
